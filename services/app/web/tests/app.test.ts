@@ -27,8 +27,9 @@ describe("pages", () => {
 		expect(csp).toContain(
 			"connect-src https://flisk.sh https://analytics.flisk.si;",
 		);
-		expect(await res.clone().text()).toContain(
-			'<script src="https://flisk.si/assets/bar.js" defer></script>',
+		const html = await res.clone().text();
+		expect(html).toContain(
+			'<script defer data-domain="citable.flisk.si" src="https://flisk.sh/a.js"></script><script src="https://flisk.si/assets/bar.js" defer></script>',
 		);
 		expect(res.headers.get("strict-transport-security")).toContain("max-age=");
 		expect(await res.text()).toContain("Can AI answers cite your site?");
