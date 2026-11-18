@@ -1,5 +1,6 @@
 // Search, link previews and AI answers: the <head> of every page, JSON-LD, robots.txt, sitemap.xml, llms.txt,
 // site.webmanifest and security.txt. All of it comes from SITE (site.ts) and the address the site is served at.
+import { COPY, type Lang, pfx } from "./i18n";
 import { SITE } from "./site";
 
 export const esc = (s: string) =>
@@ -37,8 +38,13 @@ export interface PageMeta {
 }
 
 /** `base` is the site address without the trailing slash: https://example.com, or …/api/web behind Flisk's proxy. */
-export function head(base: string, page: PageMeta): string {
-	const url = `${base}/${page.path}`;
+export function head(base: string, page: PageMeta, lang: Lang = "en"): string {
+	const c = COPY[lang];
+	const at = (l: Lang) =>
+		l === "en"
+			? `${base}/${page.path}`
+			: `${base}/ko${page.path ? `/${page.path}` : ""}`;
+	const url = at(lang);
 	const title = page.path ? `${page.title} · ${SITE.name}` : page.title;
 	const root = new URL(`${base}/`).pathname.replace(/\/$/, "");
 	const tags = [
@@ -47,6 +53,9 @@ export function head(base: string, page: PageMeta): string {
 		`<title>${esc(title)}</title>`,
 		`<meta name="description" content="${esc(page.description)}">`,
 		`<link rel="canonical" href="${esc(url)}">`,
+		`<link rel="alternate" hreflang="en" href="${esc(at("en"))}">`,
+		`<link rel="alternate" hreflang="ko" href="${esc(at("ko"))}">`,
+		`<link rel="alternate" hreflang="x-default" href="${esc(at("en"))}">`,
 		page.noindex
 			? '<meta name="robots" content="noindex">'
 			: '<meta name="robots" content="index,follow,max-image-preview:large">',
@@ -60,23 +69,28 @@ export function head(base: string, page: PageMeta): string {
 		`<link rel="alternate" type="text/plain" href="${root}/llms.txt" title="llms.txt">`,
 		`<meta property="og:type" content="website">`,
 		`<meta property="og:site_name" content="${esc(SITE.name)}">`,
-		`<meta property="og:locale" content="${SITE.locale}">`,
+		`<meta property="og:locale" content="${c.ogLocale}">`,
 		`<meta property="og:url" content="${esc(url)}">`,
 		`<meta property="og:title" content="${esc(title)}">`,
 		`<meta property="og:description" content="${esc(page.description)}">`,
 		`<meta property="og:image" content="${esc(`${base}/${ICONS.og}`)}">`,
 		'<meta property="og:image:width" content="1200">',
 		'<meta property="og:image:height" content="630">',
-		`<meta property="og:image:alt" content="${esc(`${SITE.name}: ${SITE.tagline}`)}">`,
+		`<meta property="og:image:alt" content="${esc(`${SITE.name}: ${c.tagline}`)}">`,
 		'<meta name="twitter:card" content="summary_large_image">',
 		SITE.twitter ? `<meta name="twitter:site" content="${SITE.twitter}">` : "",
-		`<script type="application/ld+json">${jsonLd(base, page)}</script>`,
+		`<script type="application/ld+json">${jsonLd(base, page, lang)}</script>`,
 	];
 	return tags.filter(Boolean).join("\n");
 }
 
 /** One schema.org @graph: the WebSite, who makes it, the app itself, and the page's own nodes. */
-export function jsonLd(base: string, page: PageMeta): string {
+export function jsonLd(
+	base: string,
+	page: PageMeta,
+	lang: Lang = "en",
+): string {
+	const c = COPY[lang];
 	const home = `${base}/`;
 	const graph: object[] = [
 		{
@@ -84,8 +98,8 @@ export function jsonLd(base: string, page: PageMeta): string {
 			"@id": `${home}#website`,
 			url: home,
 			name: SITE.name,
-			description: SITE.description,
-			inLanguage: SITE.lang,
+			description: c.description,
+			inLanguage: c.htmlLang,
 			publisher: { "@id": `${home}#publisher` },
 		},
 		{
@@ -101,7 +115,7 @@ export function jsonLd(base: string, page: PageMeta): string {
 			"@id": `${home}#app`,
 			name: SITE.name,
 			url: home,
-			description: SITE.description,
+			description: c.description,
 			applicationCategory: "DeveloperApplication",
 			operatingSystem: "Any",
 			isAccessibleForFree: true,
@@ -118,7 +132,7 @@ export function jsonLd(base: string, page: PageMeta): string {
 					"@type": "ListItem",
 					position: i + 1,
 					name: c.name,
-					item: `${base}/${c.path}`,
+					item: `${base}${pfx(lang)}${c.path ? `/${c.path}` : ""}`,
 				}),
 			),
 		});
@@ -129,9 +143,9 @@ export function jsonLd(base: string, page: PageMeta): string {
 	}).replace(/</g, "\\u003c");
 }
 
-export const faqJsonLd = () => ({
+export const faqJsonLd = (lang: Lang = "en") => ({
 	"@type": "FAQPage",
-	mainEntity: SITE.faq.map((f) => ({
+	mainEntity: COPY[lang].faq.map((f) => ({
 		"@type": "Question",
 		name: f.q,
 		acceptedAnswer: { "@type": "Answer", text: f.a },

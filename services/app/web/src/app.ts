@@ -11,6 +11,7 @@ import {
 	securityHeaders,
 	TtlCache,
 } from "./guard";
+import { LANGS, type Lang, pickLang } from "./i18n";
 import { handleMcp } from "./mcp";
 import { type Fetcher, normalizeTarget, safeFetch } from "./net";
 import { rangeResponse } from "./range";
@@ -36,6 +37,7 @@ export interface AppOptions {
 
 const RESERVED_NAMES = [
 	"",
+	"ko",
 	"check",
 	"about",
 	"badge",
@@ -158,18 +160,78 @@ export function createApp(options: AppOptions = {}) {
 			if (!c.res.headers.has(k)) c.res.headers.set(k, v);
 	});
 
+	/** The language of this page: Korean lives under /ko (the outer app strips the prefix and sets this header). */
+	const langOf = (c: {
+		req: { header: (n: string) => string | undefined };
+	}): Lang => (c.req.header("x-citable-lang") === "ko" ? "ko" : "en");
+	/** Where this language's pages live, under the site address. */
+	const pre = (c: Parameters<typeof siteOf>[0]) =>
+		rootOf(c) + (langOf(c) === "ko" ? "/ko" : "");
+	/** Headers for a page that depends on the visitor's language. */
+	const pageHeaders = (
+		extra: Record<string, string> = {},
+	): Record<string, string> => ({ vary: "Accept-Language, Cookie", ...extra });
+
+	/**
+	 * Sends the visitor to the page in their language, so every language has its own address (and its own line in
+	 * analytics): ?lang=ko or ?lang=en is an explicit choice, remembered in a cookie; with none, the cookie, else the
+	 * browser's Accept-Language decides. Returns a redirect, or undefined when this page is already the right one.
+	 */
+	const negotiate = (
+		c: Parameters<typeof siteOf>[0] & {
+			req: { query: (k: string) => string | undefined };
+		},
+	): Response | undefined => {
+		const here = langOf(c);
+		const asked = c.req.query("lang");
+		const explicit = asked === "ko" || asked === "en" ? asked : undefined;
+		let want: Lang = here;
+		if (explicit) want = explicit;
+		else if (here === "en")
+			want = pickLang({
+				cookie: c.req.header("cookie"),
+				acceptLanguage: c.req.header("accept-language"),
+			});
+		if (want === here && !explicit) return undefined;
+		const url = new URL(c.req.url);
+		url.searchParams.delete("lang");
+		const path = url.pathname === "/" ? "" : url.pathname;
+		const query = url.searchParams.toString();
+		const headers = new Headers({
+			location: `${rootOf(c)}${want === "ko" ? "/ko" : ""}${path || (want === "ko" ? "" : "/")}${query ? `?${query}` : ""}`,
+			vary: "Accept-Language, Cookie",
+			"cache-control": "private, max-age=0",
+		});
+		if (explicit)
+			headers.set(
+				"set-cookie",
+				`lang=${want}; Path=/; Max-Age=31536000; SameSite=Lax`,
+			);
+		return new Response(null, { status: explicit ? 303 : 302, headers });
+	};
+
 	app.get("/health", (c) => c.json({ status: "ok", service: "citable" }));
 	app.get("/ready", (c) => c.json({ ready: true }));
-	app.get("/", (c) =>
-		c.html(homePage(siteOf(c)), 200, {
-			"cache-control": "public, max-age=300",
-		}),
-	);
-	app.get("/about", (c) =>
-		c.html(aboutPage(siteOf(c)), 200, {
-			"cache-control": "public, max-age=300",
-		}),
-	);
+	app.get("/", (c) => {
+		const moved = negotiate(c);
+		if (moved) return moved;
+		const lang = langOf(c);
+		return c.html(
+			homePage(siteOf(c), false, lang),
+			200,
+			pageHeaders({ "cache-control": "public, max-age=300" }),
+		);
+	});
+	app.get("/about", (c) => {
+		const moved = negotiate(c);
+		if (moved) return moved;
+		const lang = langOf(c);
+		return c.html(
+			aboutPage(siteOf(c), lang),
+			200,
+			pageHeaders({ "cache-control": "public, max-age=300" }),
+		);
+	});
 	app.get("/robots.txt", (c) =>
 		c.text(robotsTxt(siteOf(c).replace(/\/$/, ""))),
 	);
@@ -177,7 +239,14 @@ export function createApp(options: AppOptions = {}) {
 		c.body(
 			sitemapXml(
 				siteOf(c).replace(/\/$/, ""),
-				["", "about", ...EXAMPLES],
+				[
+					"",
+					"about",
+					...EXAMPLES,
+					"ko",
+					"ko/about",
+					...EXAMPLES.map((e) => `ko/${e}`),
+				],
 				startedOn,
 			),
 			200,
@@ -218,9 +287,9 @@ export function createApp(options: AppOptions = {}) {
 
 	app.get("/check", (c) => {
 		const target = normalizeTarget(c.req.query("url") ?? "");
-		if (!target) return c.redirect(`${rootOf(c)}/`, 303);
+		if (!target) return c.redirect(`${pre(c)}/`, 303);
 		return c.redirect(
-			`${rootOf(c)}/${target.hostname}${target.pathname === "/" ? "" : target.pathname}${target.search}`,
+			`${pre(c)}/${target.hostname}${target.pathname === "/" ? "" : target.pathname}${target.search}`,
 			303,
 		);
 	});
@@ -298,15 +367,20 @@ export function createApp(options: AppOptions = {}) {
 		const url = new URL(c.req.url);
 		const rest = url.pathname.slice(1);
 		if (RESERVED.has(rest.split("/")[0])) return c.notFound();
+		const moved = negotiate(c);
+		if (moved) return moved;
 		const params = new URLSearchParams(url.search);
 		const fresh = params.get("fresh") === "1";
 		params.delete("fresh");
+		const lang = langOf(c);
+		const langHeaders = pageHeaders();
+		params.delete("lang");
 		const query = params.toString();
 		let decoded: string;
 		try {
 			decoded = decodeURIComponent(rest);
 		} catch {
-			return c.html(homePage(siteOf(c), true), 404);
+			return c.html(homePage(siteOf(c), true, lang), 404, langHeaders);
 		}
 		const fileExtension = decoded.match(/\.([^.]+)$/)?.[1].toLowerCase();
 		if (
@@ -316,24 +390,48 @@ export function createApp(options: AppOptions = {}) {
 		)
 			return c.notFound();
 		const target = normalizeTarget(decoded + (query ? `?${query}` : ""));
-		if (!target) return c.html(homePage(siteOf(c), true), 404);
+		if (!target)
+			return c.html(homePage(siteOf(c), true, lang), 404, langHeaders);
 		// One address per page: https://example.com/ and example.com both land on /example.com.
 		const canonicalPath = `/${target.hostname}${target.pathname === "/" ? "" : target.pathname}`;
 		if (canonicalPath !== url.pathname)
 			return c.redirect(
-				`${rootOf(c)}${canonicalPath}${query ? `?${query}` : ""}`,
+				`${pre(c)}${canonicalPath}${query ? `?${query}` : ""}`,
 				301,
 			);
 		const result = await report(target, ipOf(c), fresh);
 		if (fresh)
 			return c.redirect(
-				rootOf(c) + canonicalPath + (query ? `?${query}` : ""),
+				pre(c) + canonicalPath + (query ? `?${query}` : ""),
 				303,
 			);
 		if (!("checks" in result))
 			return c.text(result.error, result.status as 429 | 503);
-		return c.html(reportPage(result, siteOf(c)), 200);
+		return c.html(reportPage(result, siteOf(c), lang), 200, langHeaders);
 	});
 
-	return app;
+	// Korean pages live under /ko: the same routes, with the prefix taken off and the language noted for them.
+	const outer = new Hono<{
+		Bindings: { requestIP?: (r: Request) => { address: string } | null };
+	}>();
+	outer.all("*", (c) => {
+		const url = new URL(c.req.url);
+		let ctx: Parameters<typeof app.fetch>[2];
+		try {
+			ctx = c.executionCtx;
+		} catch {
+			ctx = undefined; // Bun and tests have none
+		}
+		if (!/^\/ko(\/|$)/.test(url.pathname))
+			return app.fetch(c.req.raw, c.env, ctx);
+		url.pathname = url.pathname.slice(3) || "/";
+		const headers = new Headers(c.req.raw.headers);
+		headers.set("x-citable-lang", "ko");
+		return app.fetch(
+			new Request(url, { method: c.req.method, headers, redirect: "manual" }),
+			c.env,
+			ctx,
+		);
+	});
+	return outer;
 }
